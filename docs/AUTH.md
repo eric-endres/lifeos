@@ -163,9 +163,12 @@ Streamable HTTP, pensado pra ser cadastrado como "custom connector" em
 claude.ai (Settings → Connectors), não pra ser aberto num browser. Expõe
 tools de CONSULTA sobre todo o sistema (`search_notas`, `search_tarefas`,
 `search_projetos`, `search_eventos`, `search_manifestacoes`,
-`search_movimentacoes`) e uma única tool de ESCRITA (`create_nota`) —
-decisão explícita do autor: nenhum outro domínio ganha create/update/delete
-por aqui.
+`search_movimentacoes`) e duas tools de ESCRITA: `create_nota` e
+`create_movimentacao`. O autor original deixou só `create_nota`; este fork
+acrescentou `create_movimentacao` (22/09/2026) para lançar gastos conversando
+com a IA. Consequência: **a URL do conector agora também GRAVA
+movimentações** — vazar a URL passa a significar "alguém lança gastos em meu
+nome", não só "alguém lê". Continua sem update/delete por aqui.
 
 **Auth É DIFERENTE do resto do projeto** (2ª versão do arquivo, 8ª rodada,
 set/2026 — pedido explícito do autor: a 1ª versão pedia a senha mestre como

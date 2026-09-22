@@ -165,7 +165,8 @@ server-side. É a única parte do projeto com backend dinâmico.
   `lifeos-projetos` (query/create/update/delete), `lifeos-tarefas`
   (query/create/update/delete), `lifeos-manifestacoes` (query/create),
   `lifeos-notas` (query/create/update/delete) e `lifeos-mcp` (servidor MCP,
-  6 tools de consulta + `create_nota` como única tool de escrita, ver
+  6 tools de consulta + 2 de escrita, `create_nota` e
+  `create_movimentacao`, ver
   `AUTH.md` §4) + RPCs
   (`check_master_token`, `lifeos_saldo_abertura`, `lifeos_range`).
   Versionadas em `supabase/functions/`: `lifeos-movimentacoes`,

@@ -4,10 +4,17 @@
 // -- pensado pra ser cadastrado como "custom connector" em claude.ai (Settings
 // > Connectors > Add custom connector, colando a URL desta function + token).
 // Expoe tools de CONSULTA sobre todo o sistema (Notas, Tarefas, Projetos,
-// Eventos, Manifestações, Finanças) e uma única tool de ESCRITA:
-// create_nota. Nenhum outro domínio ganha create/update/delete por aqui --
-// decisão explícita do autor (8ª rodada, set/2026): "vamos deixar apenas o
-// notas com tool para create".
+// Eventos, Manifestações, Finanças) e duas tools de ESCRITA: create_nota e
+// create_movimentacao. Nenhuma outra escrita (update/delete, outros domínios)
+// passa por aqui.
+//
+// Histórico: a 8ª rodada do autor original (set/2026) deixou só create_nota
+// ("vamos deixar apenas o notas com tool para create"). Este fork acrescentou
+// create_movimentacao (22/09/2026) para lançar gastos conversando com a IA
+// no app do Claude. Consequência consciente: quem tiver a URL do conector
+// passa a poder GRAVAR movimentações, não só ler — o token de 256 bits no
+// path continua sendo a única fronteira. Continua SEM update/delete: um
+// lançamento errado se corrige pela tela de Finanças.
 //
 // Transporte: Streamable HTTP, SEM estado entre chamadas (sem Mcp-Session-Id)
 // -- cada POST e' um JSON-RPC 2.0 completo e independente, o que combina bem
@@ -202,8 +209,7 @@ function buildTools() {
     description:
       "Cria uma nova nota no LifeOS. A data é sempre a data atual (não é um " +
       "parâmetro). Todos os outros campos são obrigatórios: nome, tipo/tags, " +
-      "ao menos um projeto vinculado, e o conteúdo completo em markdown. " +
-      "Única tool de escrita deste servidor -- todo o resto é só consulta.",
+      "ao menos um projeto vinculado, e o conteúdo completo em markdown.",
     inputSchema: {
       type: "object",
       properties: {
@@ -213,6 +219,37 @@ function buildTools() {
         conteudo_md: { type: "string", description: "Conteúdo completo da nota, em markdown." },
       },
       required: ["name", "tipo", "projetos", "conteudo_md"],
+    },
+  },
+  {
+    name: "create_movimentacao",
+    description:
+      "Lança uma movimentação financeira (gasto ou entrada) no LifeOS. Use quando o " +
+      "usuário disser que gastou, pagou, comprou, recebeu ou quiser registrar um valor. " +
+      "Regras: (1) `valor` é sempre positivo — a `direcao` diz se é gasto (Saida) ou " +
+      "entrada (Entrada). (2) `data` é opcional e o padrão é HOJE no fuso de São Paulo; " +
+      "só informe se o usuário falar outra ('ontem', 'dia 15'). (3) `meio`: se o usuário " +
+      "NÃO disser como pagou, PERGUNTE antes de lançar — Crédito não sai do caixa no mês " +
+      "(vira fatura futura) e os demais saem na hora, então chutar muda o saldo. " +
+      "(4) `categoria`: escolha da lista a que melhor descreve o gasto (gasolina → " +
+      "Transporte, almoço → Restaurante, aluguel → Moradia); se nenhuma servir com " +
+      "segurança, pergunte. (5) `name` é a descrição curta, sem repetir a categoria. " +
+      "(6) Pagamento de FATURA do cartão: direcao Saida, SEM meio, e a palavra 'fatura' " +
+      "no name (ex.: 'Pagamento fatura setembro') — é assim que o sistema o reconhece. " +
+      "(7) Vários gastos numa mensagem = uma chamada por gasto. Depois de lançar, " +
+      "confirme ao usuário o que foi gravado. Não existe editar/apagar por aqui: se " +
+      "errar, oriente a corrigir na tela de Finanças.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Descrição curta (ex.: 'gasolina', 'almoço com a equipe')." },
+        valor: { type: "number", exclusiveMinimum: 0, description: "Valor em reais, positivo (ex.: 45.9)." },
+        direcao: { type: "string", enum: VOCAB.mov_direcao, default: "Saida", description: "Saida = gasto; Entrada = dinheiro recebido." },
+        meio: { type: "string", enum: VOCAB.mov_meio, description: "Meio de pagamento. Pergunte se o usuário não disser. Omitir = sem meio (só para pagamento de fatura ou quando o usuário pedir)." },
+        categoria: { type: "string", enum: VOCAB.mov_categoria, description: "Categoria de gasto (opcional, recomendada para Saida)." },
+        data: { type: "string", description: "YYYY-MM-DD. Opcional — padrão: hoje (São Paulo)." },
+      },
+      required: ["name", "valor", "direcao"],
     },
   },
   {
@@ -376,6 +413,7 @@ Deno.serve(async (req) => {
       const handlers: Record<string, (args: Record<string, any>) => Promise<unknown>> = {
         search_notas: (a) => handleSearchNotas(REST, restHeaders, a),
         create_nota: (a) => handleCreateNota(REST, restHeaders, a),
+        create_movimentacao: (a) => handleCreateMovimentacao(REST, restHeaders, a),
         search_tarefas: (a) => handleSearchTarefas(REST, restHeaders, a),
         search_projetos: (a) => handleSearchProjetos(REST, restHeaders, a),
         search_eventos: (a) => handleSearchEventos(REST, restHeaders, a),
@@ -489,7 +527,7 @@ async function handleSearchNotas(REST: string, headers: Record<string, string>, 
   }, null, 2));
 }
 
-// ── Tool: create_nota (única tool de escrita deste servidor) ─────────────
+// ── Tool: create_nota (escrita) ───────────────────────────────────────────
 async function resolveProjetoNomes(projetos: ProjetoRow[], nomes: string[]) {
   const resolved: { id: string; name: string }[] = [];
   const naoEncontrados: string[] = [];
@@ -545,6 +583,71 @@ async function handleCreateNota(REST: string, headers: Record<string, string>, a
   return toolText(JSON.stringify({
     ok: true,
     nota: { id: created.id, name: created.name, tipo: created.tipo ?? [], data: created.data, projetos: resolved, conteudo_md: created.conteudo_md, created_at: created.created_at },
+  }, null, 2));
+}
+
+// ── Tool: create_movimentacao (escrita) ───────────────────────────────────
+// Mesma validação de lifeos-movimentacoes (direção exatamente uma, meio e
+// categoria do vocabulário, valor positivo), só que com mensagens em texto
+// pro modelo LER e se corrigir. Cópia isolada, não import (LIFEOS.md §2).
+
+// Competência de crédito, cópia de faturaDestino() em financas.js: a fatura
+// fecha no ÚLTIMO dia do mês — compra antes dele cai em M+1; no último dia,
+// em M+2. Só serve pra confirmação ficar útil ("vai pra fatura de outubro").
+function faturaDestino(data: string): string {
+  const [y, m, d] = data.split("-").map(Number);
+  const ultimo = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const salto = d < ultimo ? 1 : 2;
+  const alvo = new Date(Date.UTC(y, m - 1 + salto, 1));
+  return `${alvo.getUTCFullYear()}-${String(alvo.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function dataValida(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+async function handleCreateMovimentacao(REST: string, headers: Record<string, string>, args: Record<string, any>) {
+  const name = String(args?.name ?? "").trim();
+  if (!name) return toolText("O parâmetro name (descrição do gasto) é obrigatório.", true);
+
+  const valor = Number(args?.valor);
+  if (!Number.isFinite(valor) || valor <= 0) return toolText("O parâmetro valor precisa ser um número positivo — o sinal vem da direção, não do número.", true);
+
+  const direcao = String(args?.direcao ?? "Saida");
+  if (!VOCAB.mov_direcao.includes(direcao)) return toolText(`Direção inválida: ${direcao}. Valores aceitos: ${VOCAB.mov_direcao.join(", ")}.`, true);
+
+  const meio = args?.meio ? String(args.meio).trim() : "";
+  if (meio && !VOCAB.mov_meio.includes(meio)) return toolText(`Meio inválido: ${meio}. Valores aceitos: ${VOCAB.mov_meio.join(", ")}.`, true);
+
+  const categoria = args?.categoria ? String(args.categoria).trim() : "";
+  if (categoria && !VOCAB.mov_categoria.includes(categoria)) return toolText(`Categoria inválida: ${categoria}. Valores aceitos: ${VOCAB.mov_categoria.join(", ")}.`, true);
+
+  const data = args?.data ? String(args.data).trim() : todayInSaoPaulo();
+  if (!dataValida(data)) return toolText(`Data inválida: ${data}. Use YYYY-MM-DD (ex.: ${todayInSaoPaulo()}).`, true);
+
+  const tipo = meio ? [direcao, meio] : [direcao];
+  const res = await fetch(`${REST}/lifeos_movimentacoes`, {
+    method: "POST",
+    headers: { ...headers, Prefer: "return=representation" },
+    body: JSON.stringify({ name, valor: Math.round(valor * 100) / 100, date: data, tipo, categoria: categoria || null }),
+  });
+  if (!res.ok) return toolText(`Erro ao gravar a movimentação: ${res.status} ${await res.text()}`, true);
+  const row = (await res.json())[0];
+
+  const credito = direcao === "Saida" && meio === "Crédito";
+  const pagamentoFatura = direcao === "Saida" && !meio && /fatura/i.test(name);
+  return toolText(JSON.stringify({
+    ok: true,
+    movimentacao: { id: row.id, name: row.name, valor: Number(row.valor), date: row.date, tipo: row.tipo, categoria: row.categoria ?? null },
+    // Contexto pro modelo confirmar em linguagem natural sem adivinhar a regra.
+    efeito: credito
+      ? `compra no crédito: não sai do caixa agora, entra na fatura de ${faturaDestino(data)}`
+      : pagamentoFatura
+        ? "pagamento de fatura: abate a fatura que fecha neste mês"
+        : (direcao === "Saida" ? "saída de caixa na data informada" : "entrada de caixa na data informada"),
   }, null, 2));
 }
 

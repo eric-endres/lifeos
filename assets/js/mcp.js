@@ -66,7 +66,12 @@
     {
       nome: 'create_nota', tipo: 'escrita',
       desc: 'Cria uma nota nova. A data é sempre hoje. Exige nome, tipo, ao menos um projeto e o conteúdo.',
-      filtros: 'única ferramenta de escrita do servidor',
+      filtros: 'nome · tipo · projetos · conteúdo',
+    },
+    {
+      nome: 'create_movimentacao', tipo: 'escrita',
+      desc: 'Lança um gasto ou entrada ("gastei 50 de gasolina no pix"). A data padrão é hoje; o meio é perguntado se você não disser, porque Crédito vira fatura futura.',
+      filtros: 'descrição · valor · direção · meio · categoria · data',
     },
     {
       nome: 'search_tarefas', tipo: 'leitura',
@@ -90,8 +95,8 @@
     },
     {
       nome: 'search_movimentacoes', tipo: 'leitura',
-      desc: 'Busca movimentações financeiras, para a IA somar e comparar períodos.',
-      filtros: 'nome · direção · meio · data · faixa de valor',
+      desc: 'Busca movimentações financeiras e devolve o total somado, para a IA comparar períodos.',
+      filtros: 'nome · direção · meio · categoria · data · faixa de valor',
     },
   ];
 
