@@ -73,6 +73,10 @@ const DOMINIOS: Record<string, { rotulo: string; tabela: string; coluna: string;
   manifestacao_tag:    { rotulo: "Tags de manifestação",     tabela: "lifeos_manifestacoes",  coluna: "tags",   array: true,  cor: false },
   mov_direcao:         { rotulo: "Direção de movimentação",  tabela: "lifeos_movimentacoes",  coluna: "tipo",   array: true,  cor: false },
   mov_meio:            { rotulo: "Meios de pagamento",       tabela: "lifeos_movimentacoes",  coluna: "tipo",   array: true,  cor: false },
+  // Migration 0003. `cor: true` porque o donut de Finanças pinta cada
+  // categoria com a sua — e só as que TÊM cor ganham fatia própria; as sem
+  // cor se agrupam em "Outras".
+  mov_categoria:       { rotulo: "Categorias de gasto",      tabela: "lifeos_movimentacoes",  coluna: "categoria", array: false, cor: true },
 };
 
 const json = (body: unknown, status = 200) =>

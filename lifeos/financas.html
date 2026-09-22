@@ -319,6 +319,31 @@
     .tag-entrada { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
     .tag-saida   { color: var(--red);   border-color: color-mix(in srgb, var(--red) 40%, transparent); }
     .tag-credito, .tag-debito, .tag-pix, .tag-vale, .tag-boleto { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 32%, transparent); }
+    /* Categoria (migration 0003): o texto fica na tinta do texto; quem carrega
+       a identidade é o ponto colorido ao lado — cor nunca sozinha. */
+    .tag-cat { display: inline-flex; align-items: center; gap: 5px; color: var(--dim); text-transform: none; letter-spacing: 0.02em; font-size: 10px; }
+    .cat-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--mute); }
+    .tag-cat .cat-dot { width: 7px; height: 7px; }
+
+    /* ── Ranking de categorias ── */
+    .cat-rank { display: flex; flex-direction: column; gap: 2px; max-height: 330px; overflow-y: auto; margin: -4px -8px 0; }
+    .cat-rank-row {
+      display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 5px 10px;
+      width: 100%; padding: 8px; background: transparent; border: none; border-radius: 6px;
+      font-family: var(--mono); color: var(--text); text-align: left; cursor: pointer; transition: background 0.15s;
+    }
+    .cat-rank-row:hover { background: var(--gold-wash); }
+    .cat-rank-name { font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cat-rank-val { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+    .cat-rank-bar { grid-column: 2; height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+    .cat-rank-bar > span { display: block; height: 100%; border-radius: 2px; background: var(--mute); }
+    .cat-rank-meta { grid-column: 3; font-size: 10.5px; color: var(--mute); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .cat-delta.up { color: var(--red); }
+    .cat-delta.down { color: var(--green); }
+    .cat-rank-empty { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); padding: 40px 0; text-align: center; }
+
+    /* ── Últimos meses ── */
+    .hist-summary { margin-top: 14px; }
 
     .foot { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 10px; letter-spacing: 0.25em; text-transform: uppercase; color: var(--mute); }
     .foot .icon-btn { width: 28px; height: 28px; font-size: 12px; text-transform: none; letter-spacing: 0; }
@@ -344,6 +369,7 @@
       transition: border-color 0.15s;
     }
     .edit-input:focus { border-color: var(--gold); }
+    .edit-label-opt { text-transform: none; letter-spacing: 0.04em; }
     .edit-error { min-height: 14px; font-size: 11px; letter-spacing: 0.04em; color: var(--red); margin-top: 10px; }
     .edit-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
     .edit-btn { font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; padding: 10px 18px; border-radius: 6px; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; }
@@ -591,6 +617,17 @@
       <div id="fatura-projetada"></div>
     </section>
 
+    <section class="charts" id="cat-row">
+      <div class="card">
+        <div class="card-title">Por categoria <span class="hint">· saídas do mês · toque numa fatia</span></div>
+        <div class="chart-wrap"><canvas id="chart-cat"></canvas><div id="cat-empty" class="chart-empty" hidden>sem saídas neste mês</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Ranking de categorias <span class="hint" id="cat-rank-hint">· vs. mês anterior</span></div>
+        <div id="cat-rank" class="cat-rank"></div>
+      </div>
+    </section>
+
     <section class="charts">
       <div class="card">
         <div class="card-title">Por meio de pagamento <span class="hint">· toque numa fatia</span></div>
@@ -612,6 +649,12 @@
       <div class="card-title">Saldo acumulado no mês</div>
       <div id="saldo-abertura-note" class="abertura-note" hidden></div>
       <div class="chart-wrap tall"><canvas id="chart-saldo"></canvas></div>
+    </section>
+
+    <section class="card" id="hist-card">
+      <div class="card-title">Últimos meses <span class="hint">· entradas × saídas · toque num mês para abri-lo</span></div>
+      <div class="chart-wrap"><canvas id="chart-hist"></canvas><div id="hist-empty" class="chart-empty" hidden>carregando histórico…</div></div>
+      <div id="hist-summary" class="analysis hist-summary" hidden></div>
     </section>
 
     <div class="section-divider"></div>
@@ -710,6 +753,19 @@
       </div>
 
       <div class="help-section">
+        <div class="help-section-title">Categorias</div>
+        <p>Cada movimentação pode ter uma <strong>categoria</strong> (<span class="tag tag-cat"><i class="cat-dot" style="background:#3987e5"></i>Moradia</span>, <span class="tag tag-cat"><i class="cat-dot" style="background:#199e70"></i>Mercado</span>…) — opcional, escolhida ao criar ou editar. A lista e as cores são editáveis em <strong>LifeOS → menu → Tags</strong>.</p>
+        <p><strong>Por categoria:</strong> as saídas do mês (crédito incluído) divididas por categoria. O <strong>pagamento de fatura fica de fora</strong>: ele paga compras que já foram contadas no mês em que foram feitas, e somar os dois contaria o mesmo dinheiro duas vezes. Só categorias <strong>com cor</strong> ganham fatia própria, e no máximo oito — as demais se agrupam em <span class="tag">Outras</span>. Saídas sem categoria aparecem como <span class="tag">Sem categoria</span>.</p>
+        <p><strong>Ranking:</strong> todas as categorias do mês, da maior para a menor, com a fatia do total e a variação contra o mês anterior (<span class="cat-delta up">▲</span> gastou mais, <span class="cat-delta down">▼</span> gastou menos). Tocar numa linha — ou numa fatia — abre as transações daquela categoria.</p>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-title">Últimos meses</div>
+        <p>Entradas e saídas dos até seis meses que terminam no mês exibido, com o mês atual em destaque. As saídas seguem a mesma regra do gráfico de categorias: compras no crédito contam no mês da compra e o pagamento de fatura fica de fora. Tocar numa barra abre aquele mês. Abaixo, a média mensal de saídas (só meses já fechados) e o mês mais caro e o mais barato.</p>
+        <p>Os meses anteriores vêm do mesmo cache por mês da página: o primeiro acesso busca cada um uma vez; depois, abrem sem rede.</p>
+      </div>
+
+      <div class="help-section">
         <div class="help-section-title">Fluxo diário &amp; saldo acumulado</div>
         <p><strong>Fluxo diário:</strong> entradas e saídas de cada dia do mês.</p>
         <p><strong>Saldo acumulado:</strong> saldo de caixa dia a dia, começando do saldo de abertura (o que sobrou dos meses anteriores).</p>
@@ -717,7 +773,7 @@
 
       <div class="help-section">
         <div class="help-section-title">Transações &amp; recorrências</div>
-        <p><strong>Transações do mês:</strong> lista completa, filtrável por direção e meio, agrupada por dia — cada cabeçalho de data mostra entradas, saídas e a diferença daquele dia.</p>
+        <p><strong>Transações do mês:</strong> lista completa, filtrável por direção e meio, agrupada por dia — cada cabeçalho de data mostra entradas, saídas e a diferença daquele dia. A busca procura na descrição e na categoria.</p>
         <p><strong>Recorrências:</strong> agrupa as movimentações por descrição, mostrando quantas vezes cada uma aparece e o saldo líquido acumulado.</p>
       </div>
 
@@ -767,6 +823,11 @@
             <option value="Boleto">Boleto</option>
           </select>
         </div>
+        <div class="edit-field">
+          <label class="edit-label" for="edit-categoria">Categoria</label>
+          <!-- opções montadas em financas.js (fillCategoriaSelect), a partir do vocabulário -->
+          <select id="edit-categoria" class="edit-input"></select>
+        </div>
         <div id="edit-error" class="edit-error"></div>
         <div class="edit-actions">
           <button type="button" id="edit-cancel" class="edit-btn edit-btn-ghost">Cancelar</button>
@@ -783,7 +844,7 @@
     <div class="modal-head">
       <div>
         <div class="modal-title">Nova movimentação</div>
-        <div class="modal-sub">todos os campos são obrigatórios</div>
+        <div class="modal-sub">todos os campos são obrigatórios, menos a categoria</div>
       </div>
       <button id="create-modal-close" class="modal-close" aria-label="Fechar"><i class="fad fa-times"></i></button>
     </div>
@@ -819,6 +880,11 @@
             <option value="Boleto">Boleto</option>
           </select>
         </div>
+        <div class="edit-field">
+          <label class="edit-label" for="create-categoria">Categoria <span class="edit-label-opt">· opcional</span></label>
+          <!-- opções montadas em financas.js (fillCategoriaSelect), a partir do vocabulário -->
+          <select id="create-categoria" class="edit-input"></select>
+        </div>
         <div id="create-error" class="edit-error"></div>
         <div class="edit-actions">
           <button type="button" id="create-cancel" class="edit-btn edit-btn-ghost">Cancelar</button>
@@ -833,7 +899,7 @@
 <div id="loading" class="loading-ov" hidden><div class="spinner"></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
-<script src="../assets/js/financas.js?v=20260916f"></script>
+<script src="../assets/js/financas.js?v=20260922a"></script>
 <script src="../assets/js/back-to-top.js?v=20260617"></script>
 
 <!-- SYSTEM SKIN · campo ambiente — mesmo efeito de index / galeria / sobre -->

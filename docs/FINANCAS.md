@@ -40,7 +40,8 @@ recorrências e análises **mês a mês**.
   `rel="nofollow"`.
 - **Export:** botão na topbar (ao lado do refresh) exporta o mês corrente em
   `.csv` (`movimentacoes-YYYY-MM.csv`), BOM UTF-8 + CRLF, colunas `data, descricao,
-  valor, direcao, meio, tipo_raw, valor_liquido, id`. No iPhone usa o **share
+  valor, direcao, meio, tipo_raw, valor_liquido, id, categoria` (`categoria` entrou
+  no **fim** em set/2026, pra não deslocar quem lê o CSV por posição). No iPhone usa o **share
   nativo** (Web Share API — `navigator.share` com `files`) pra enviar a outro app
   sem baixar; no desktop cai pro download.
 - **Saldo de abertura:** o gráfico de saldo acumulado começa do saldo de caixa
@@ -120,6 +121,38 @@ recorrências e análises **mês a mês**.
   Vale tanto pra pagamentos feitos no mês exibido quanto pros carregados via
   `carryInto`. **Só funciona se o registro no Notion for de fato renomeado**
   com "adiant" no nome — é uma marcação de intenção manual, não é inferida.
+- **Categorias (set/2026, migration `0003_categorias.sql`):** cada movimentação
+  pode ter uma `categoria` — coluna própria, escalar, opcional, validada contra o
+  domínio `mov_categoria` de `lifeos_vocabularios` (editável em **Tags**, com cor).
+  Aparece como tag com ponto colorido na tabela, é escolhida nos modais de criar/
+  editar (opções montadas na abertura do modal, não no `init()` — o vocabulário
+  chega depois) e entra na busca. Base de todos os agregados de categoria:
+  **consumo** = `isConsumo` = saídas com crédito incluído **menos** pagamentos de
+  fatura (`isPagamentoFatura`) — a fatura paga compras já contadas no mês da
+  compra; somar as duas contaria o mesmo dinheiro duas vezes.
+  - **Por categoria (donut):** só categorias **com cor** ganham fatia, na **ordem
+    do vocabulário, não por valor**. A paleta semeada (8 cores) foi validada para
+    daltonismo contra a superfície do painel **par a par entre vizinhas nessa
+    ordem** (pior ΔE CVD 8,4, visão normal 19,3, contraste ≥ 3:1) — ordenar por
+    valor embaralharia os pares. Sem cor → **Outras** (cinza); mais de 8 coloridas
+    no mês → ficam as 7 maiores, o resto também vai pra Outras. Saídas sem
+    categoria → **Sem categoria** (cinza). Nunca uma nona cor. Clique numa fatia
+    → `openCategoriaModal`.
+  - **Ranking de categorias:** todas as categorias do mês por valor, com barra,
+    % do total e **variação contra o mês anterior** (▲ vermelho = gastou mais,
+    ▼ verde = menos; a seta vai junto, cor nunca sozinha). O mês anterior vem de
+    `ensureMonthRows` — desenha sem a variação e completa quando chega. Categorias
+    que zeraram entram no fim. É também a "visão em tabela" do donut.
+- **Últimos meses:** barras de entradas × consumo dos até 6 meses que terminam no
+  mês exibido (limitado por `RANGE.min`), o exibido em cor cheia e os outros
+  esmaecidos. Clique numa barra → `goToMonth`. Resumo embaixo: média mensal,
+  mais caro e mais barato **só com meses fechados** (o mês corrente, pela
+  metade, pareceria sempre o mais barato), e a variação contra o anterior.
+  **Sem rota nova:** os meses vêm de `ensureMonthRows`, o mesmo cache por mês —
+  primeiro acesso busca cada mês uma vez, depois abre sem rede. `HIST_SEQ`
+  descarta um desenho que chegou depois de o usuário navegar.
+- **`CACHE_V = 3`:** subiu junto com as categorias — um cache v2 não tem o campo e
+  mostraria tudo como "Sem categoria" até o ↻ de cada mês.
 - **Donut por meio de pagamento — 3 modos:** toggle (Saídas / Entradas / Ambos)
   acima do gráfico. Saídas é o comportamento original e o default; Entradas
   espelha o mesmo agrupamento por meio só pras entradas; Ambos soma os dois
@@ -256,7 +289,8 @@ da página**, sobre o JSON normalizado de **um mês**. As Edge Functions são
 ### 4.2 Backend (Supabase · projeto `SEU-PROJETO-REF` · região `<sua região>`)
 - **Tabela `public.lifeos_movimentacoes`** — fonte de verdade das
   movimentações. Colunas: `id uuid`, `name text`, `valor numeric(12,2)`,
-  `date date`, `tipo text[]`, `created_at`, `updated_at`. RLS habilitado sem
+  `date date`, `tipo text[]`, `categoria text` (nula; migration `0003`),
+  `created_at`, `updated_at`. RLS habilitado sem
   policies (só `service_role` acessa — mesma postura de `access_tokens`/
   `admin_config`). Índice em `date`.
 - **Edge Function `lifeos-movimentacoes`** (`verify_jwt=false` — intencional).
@@ -348,10 +382,11 @@ Headers: `apikey: <anon>`, `Content-Type: application/json`
   "count": 43,
   "fetched_at": "2026-06-21T19:35:55.571Z",
   "movimentacoes": [
-    { "id": "<uuid>", "name": "Mercado", "valor": 84.30, "date": "2026-06-12", "tipo": ["Saida","Crédito"], "created_at": "2026-06-12T14:02:11.000Z" }
+    { "id": "<uuid>", "name": "Mercado", "valor": 84.30, "date": "2026-06-12", "tipo": ["Saida","Crédito"], "categoria": "Mercado", "created_at": "2026-06-12T14:02:11.000Z" }
   ]
 }
 ```
+`categoria` é `null` quando a movimentação não tem (Entradas, lançamentos antigos).
 `range` é `null` se a tabela estiver vazia. `saldo_abertura` = saldo de **caixa**
 acumulado de tudo **antes** do dia 1 de `ym` (entradas − saídas que não são
 `Crédito`); é o "quanto sobrou/faltou dos meses anteriores", calculado
@@ -403,7 +438,9 @@ escrita se vier presente; pelo menos uma é obrigatória. Validação server-sid
 ver §7); `date` casa `YYYY-MM-DD`; `tipo` é array não-vazio com **exatamente
 uma** das tags `Entrada`/`Saida` e o resto (se houver) dentro de
 `Crédito/Débito/Pix/Vale/Boleto` — qualquer coisa fora disso é `400
-invalid_tipo`, sem tocar o banco.
+invalid_tipo`, sem tocar o banco. `categoria` (opcional, set/2026): string do
+domínio `mov_categoria` ou `null`/`""` para limpar; fora do vocabulário é `400
+invalid_categoria`. Vale igual para o `create` (§6.2), onde também é opcional.
 
 **Response 200**
 ```json
@@ -460,7 +497,10 @@ mesmo gate `check_master_token`. Resposta: `{ ok: true, id: "<uuid>" }` ou
 `{ ok: false, error: "..." }` (`400`/`401`/`502`, mesmos códigos de erro).
 
 Parsing (schema da tabela `lifeos_movimentacoes`):
-`name text` · `valor numeric(12,2)` · `date date` · `tipo text[]`.
+`name text` · `valor numeric(12,2)` · `date date` · `tipo text[]` ·
+`categoria text` — esta última **opcional**, lida de
+`properties.Categoria.select.name` (payload sem ela continua aceito como antes;
+fora do vocabulário → `400 invalid_categoria`).
 
 ---
 
@@ -485,6 +525,10 @@ Parsing (schema da tabela `lifeos_movimentacoes`):
   na tela (a diferença é o crédito + a abertura).
 - ⚠️ Notas/docs antigas falavam em `Essencial/Lazer/Assinatura` — **não existem**
   nesta base. Não inventar categorias.
+- **Categoria NÃO é tag de `tipo`.** Desde set/2026 ela mora na coluna própria
+  `categoria` (domínio `mov_categoria`, ver §1). Não misturar com o array: a
+  lógica de saldo/fatura lê `tipo` com `includes` e uma categoria homônima de um
+  meio (ex.: "Pix") quebraria a conta.
 
 ---
 
@@ -550,8 +594,14 @@ Parsing (schema da tabela `lifeos_movimentacoes`):
 
 ## 10. O que NÃO foi implementado (opcional, decisão à parte)
 
-- **Categorias de despesa** semânticas (não existem como tags na base).
+- **Orçamento/meta por categoria** (limite mensal com alerta). As categorias
+  existem desde set/2026 (§1); o teto por categoria ainda não.
+- **Filtro por categoria nos chips** da tabela. Hoje filtrar por categoria é pelo
+  ranking/donut (abre o modal) ou pela busca, que também procura na categoria.
 
+> As **categorias de despesa** (antes listadas aqui) foram implementadas em
+> set/2026 — migration `0003_categorias.sql`, ver §1 e §7.
+>
 > A **Fatura projetada / competência de crédito** (antes opcional) já foi
 > implementada — ver §1 e o brief `CREDITO-FATURA-PROJECAO.md`. Regra: fatura
 > fecha no último dia do mês (compra normal → M+1; compra no último dia → M+2);

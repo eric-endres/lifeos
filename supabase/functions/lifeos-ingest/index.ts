@@ -14,9 +14,12 @@
 //     "Name": { "title": [{ "text": { "content": "Mercado" } }] },
 //     "Valor": { "number": 42.5 },
 //     "Tipo": { "multi_select": [{ "name": "Saida" }, { "name": "Pix" }] },
-//     "Date": { "date": { "start": "2026-09-16" } }
+//     "Date": { "date": { "start": "2026-09-16" } },
+//     "Categoria": { "select": { "name": "Mercado" } }      <- OPCIONAL
 //   }
 // }
+// `Categoria` (migration 0003) é opcional: payloads antigos, sem ela,
+// continuam aceitos exatamente como antes.
 // `parent` e `icon` sao ignorados (o Notion exige `parent`; aqui nao ha
 // database para apontar, mas aceitamos o campo por compatibilidade de
 // payload -- nao validamos o conteudo dele).
@@ -30,6 +33,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 const DIRECOES = ["Entrada", "Saida"];
 const MEIOS_VALIDOS = ["Crédito", "Débito", "Pix", "Vale", "Boleto"];
+const CATEGORIAS_VALIDAS = ["Moradia", "Transporte", "Mercado", "Sítio", "Restaurante", "Saúde",
+  "Compras", "Lazer", "Serviços", "Educação", "Alimentação", "Beleza", "Vestuário", "Eletrônicos", "Outros"];
 
 // ── Vocabulário dinâmico ──────────────────────────────────────────────
 // As constantes acima viraram FALLBACK. Desde a migration 0002 a lista de
@@ -116,6 +121,11 @@ Deno.serve(async (req) => {
     const meioOk = tipoRaw.every((t: string) => vocab("mov_direcao", DIRECOES).includes(t) || vocab("mov_meio", MEIOS_VALIDOS).includes(t));
     if (dirCount !== 1 || !meioOk) return json({ ok: false, error: "invalid_tipo" }, 400);
 
+    const categoriaRaw = String(props?.Categoria?.select?.name ?? "").trim();
+    if (categoriaRaw && !vocab("mov_categoria", CATEGORIAS_VALIDAS).includes(categoriaRaw)) {
+      return json({ ok: false, error: "invalid_categoria" }, 400);
+    }
+
     const insertRes = await fetch(`${REST}/lifeos_movimentacoes`, {
       method: "POST",
       headers: { ...restHeaders, Prefer: "return=representation" },
@@ -124,6 +134,7 @@ Deno.serve(async (req) => {
         valor: Math.round(valor * 100) / 100,
         date: dateRaw,
         tipo: tipoRaw,
+        categoria: categoriaRaw || null,
       }),
     });
     if (!insertRes.ok) return json({ ok: false, error: `db_error: ${insertRes.status} ${await insertRes.text()}` }, 502);

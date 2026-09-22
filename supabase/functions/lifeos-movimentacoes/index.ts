@@ -52,6 +52,10 @@ const cors = {
 // das duas. Meio: zero ou mais das cinco (na pratica a UI so deixa escolher uma).
 const DIRECOES = ["Entrada", "Saida"];
 const MEIOS_VALIDOS = ["Crédito", "Débito", "Pix", "Vale", "Boleto"];
+// Categoria (migration 0003): coluna própria, escalar e OPCIONAL — não mora
+// no array `tipo`, onde colidiria com a lógica de saldo/fatura.
+const CATEGORIAS_VALIDAS = ["Moradia", "Transporte", "Mercado", "Sítio", "Restaurante", "Saúde",
+  "Compras", "Lazer", "Serviços", "Educação", "Alimentação", "Beleza", "Vestuário", "Eletrônicos", "Outros"];
 
 // ── Vocabulário dinâmico ──────────────────────────────────────────────
 // As constantes acima viraram FALLBACK. Desde a migration 0002 a lista de
@@ -164,7 +168,7 @@ function monthRange(ym: string): { first: string; nextFirst: string } {
 }
 
 function normalizeRow(r: any) {
-  return { id: r.id, name: r.name, valor: r.valor === null ? null : Number(r.valor), date: r.date, tipo: r.tipo ?? [] };
+  return { id: r.id, name: r.name, valor: r.valor === null ? null : Number(r.valor), date: r.date, tipo: r.tipo ?? [], categoria: r.categoria ?? null };
 }
 
 // Busca por mes (mesmo contrato de notion-movimentacoes): movimentacoes do
@@ -268,6 +272,15 @@ function buildFields(input: Record<string, any>, opts: { requireAll: boolean }):
     fields.tipo = tipo;
   } else if (opts.requireAll) {
     return { error: "invalid_tipo" };
+  }
+
+  // Categoria é opcional mesmo no create (requireAll não a exige): uma
+  // Entrada, ou um lançamento antigo, simplesmente não tem. `null` ou ""
+  // limpam o campo; qualquer outro valor precisa estar no vocabulário.
+  if (input.categoria !== undefined) {
+    const cat = input.categoria === null ? "" : String(input.categoria).trim();
+    if (cat && !vocab("mov_categoria", CATEGORIAS_VALIDAS).includes(cat)) return { error: "invalid_categoria" };
+    fields.categoria = cat || null;
   }
 
   return { fields };

@@ -1350,7 +1350,7 @@ Agora a fonte de verdade é a tabela `lifeos_vocabularios`, e os `CHECK`
 foram derrubados. **A validação não sumiu** — passou a ser feita pelas Edge
 Functions contra a tabela.
 
-### Os dez domínios
+### Os onze domínios
 
 | Domínio | Grava em | Formato |
 |---|---|---|
@@ -1364,9 +1364,17 @@ Functions contra a tabela.
 | `manifestacao_tag` | `lifeos_manifestacoes.tags` | array |
 | `mov_direcao` | `lifeos_movimentacoes.tipo` | array |
 | `mov_meio` | `lifeos_movimentacoes.tipo` | array |
+| `mov_categoria` | `lifeos_movimentacoes.categoria` | escalar (tem cor) — migration `0003` |
 
 **`mov_direcao` e `mov_meio` gravam na MESMA coluna** — herdado da migração
 do Notion. É o caso que mais exige cuidado em qualquer operação de rename.
+
+**`mov_categoria` tem coluna própria de propósito** (`0003_categorias.sql`):
+se fosse mais uma tag em `tipo`, uma categoria chamada "Crédito" ou "Pix"
+colidiria com a lógica de saldo e fatura, que lê aquele array com
+`includes`. A **cor** aqui não é enfeite: só categorias com cor ganham fatia
+própria no donut de Finanças (no máximo oito), e a `ordem` é a ordem das
+fatias — ver [`FINANCAS.md`](FINANCAS.md) §1.
 
 ### Renomear migra os dados
 
@@ -1416,8 +1424,11 @@ isso: os `enum` de cada `inputSchema` precisam sair do vocabulário carregado,
 senão o modelo veria uma lista diferente da que a validação aceita.
 
 > **Ao adicionar um domínio novo**, mexa em quatro lugares: os ramos das duas
-> RPCs (`0002_vocabularios.sql`), o mapa `DOMINIOS` em `lifeos-vocabularios`,
-> a Edge Function do domínio, e o JS que consome a lista.
+> RPCs (numa migration nova — `0003_categorias.sql` é o exemplo: repete o
+> corpo inteiro das duas com o ramo a mais), o mapa `DOMINIOS` em
+> `lifeos-vocabularios`, a Edge Function do domínio, e o JS que consome a
+> lista. O mock de `tags.js` (`MOCK_DOM`/`seedMock`) é o quinto, se quiser
+> ver o domínio no modo local.
 
 
 ---

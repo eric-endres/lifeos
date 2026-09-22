@@ -100,6 +100,8 @@ const FALLBACK: Record<string, string[]> = {
   manifestacao_tag: ["Vida", "Financeiro", "Carreira", "Saúde", "Lazer"],
   mov_direcao: ["Entrada", "Saida"],
   mov_meio: ["Crédito", "Débito", "Pix", "Vale", "Boleto"],
+  mov_categoria: ["Moradia", "Transporte", "Mercado", "Sítio", "Restaurante", "Saúde",
+    "Compras", "Lazer", "Serviços", "Educação", "Alimentação", "Beleza", "Vestuário", "Eletrônicos", "Outros"],
 };
 
 // Preenchido uma vez por invocação, antes de montar as tools -- o enum de
@@ -278,14 +280,16 @@ function buildTools() {
     name: "search_movimentacoes",
     description:
       "Busca movimentações financeiras do LifeOS por nome, direção " +
-      "(Entrada/Saida), meio de pagamento, intervalo de data e faixa de " +
-      "valor. Todos os filtros são opcionais e combináveis.",
+      "(Entrada/Saida), meio de pagamento, categoria de gasto, intervalo " +
+      "de data e faixa de valor. Todos os filtros são opcionais e " +
+      "combináveis. A resposta inclui o total somado dos resultados.",
     inputSchema: {
       type: "object",
       properties: {
         nome: { type: "string", description: "Trecho do nome/descrição da movimentação." },
         direcao: { type: "string", enum: VOCAB.mov_direcao, description: "Entrada ou Saida." },
         meio: { type: "array", items: { type: "string", enum: VOCAB.mov_meio }, description: "Um ou mais meios -- entra se tiver QUALQUER UM." },
+        categoria: { type: "array", items: { type: "string", enum: VOCAB.mov_categoria }, description: "Uma ou mais categorias de gasto -- entra se for QUALQUER UMA." },
         data_inicio: { type: "string", description: "Data mínima YYYY-MM-DD (inclusive)." },
         data_fim: { type: "string", description: "Data máxima YYYY-MM-DD (inclusive)." },
         valor_min: { type: "number", description: "Valor mínimo (inclusive)." },
@@ -683,6 +687,9 @@ async function handleSearchMovimentacoes(REST: string, headers: Record<string, s
   const meioFiltro = strArray(args?.meio);
   const invalidMeio = meioFiltro.filter((m) => !VOCAB.mov_meio.includes(m));
   if (invalidMeio.length) return toolText(`Meio(s) inválido(s): ${invalidMeio.join(", ")}. Valores aceitos: ${VOCAB.mov_meio.join(", ")}.`, true);
+  const catFiltro = strArray(args?.categoria);
+  const invalidCat = catFiltro.filter((c) => !VOCAB.mov_categoria.includes(c));
+  if (invalidCat.length) return toolText(`Categoria(s) inválida(s): ${invalidCat.join(", ")}. Valores aceitos: ${VOCAB.mov_categoria.join(", ")}.`, true);
   const dataInicio = args?.data_inicio ? String(args.data_inicio) : "";
   const dataFim = args?.data_fim ? String(args.data_fim) : "";
   const valorMin = args?.valor_min !== undefined ? Number(args.valor_min) : null;
@@ -693,11 +700,12 @@ async function handleSearchMovimentacoes(REST: string, headers: Record<string, s
   if (!r.ok) throw new Error(`select movimentacoes -> ${r.status} ${await r.text()}`);
   const rows = await r.json();
 
-  let movs = rows.map((row: any) => ({ id: row.id, name: row.name, valor: row.valor === null ? null : Number(row.valor), date: row.date, tipo: row.tipo ?? [] }));
+  let movs = rows.map((row: any) => ({ id: row.id, name: row.name, valor: row.valor === null ? null : Number(row.valor), date: row.date, tipo: row.tipo ?? [], categoria: row.categoria ?? null }));
 
   if (nome) movs = movs.filter((m: any) => m.name.toLowerCase().includes(nome));
   if (direcao) movs = movs.filter((m: any) => (m.tipo || []).includes(direcao));
   if (meioFiltro.length) movs = movs.filter((m: any) => (m.tipo || []).some((t: string) => meioFiltro.includes(t)));
+  if (catFiltro.length) movs = movs.filter((m: any) => m.categoria && catFiltro.includes(m.categoria));
   if (dataInicio) movs = movs.filter((m: any) => m.date >= dataInicio);
   if (dataFim) movs = movs.filter((m: any) => m.date <= dataFim);
   if (valorMin !== null) movs = movs.filter((m: any) => m.valor !== null && m.valor >= valorMin);
@@ -705,8 +713,12 @@ async function handleSearchMovimentacoes(REST: string, headers: Record<string, s
 
   const totalMatches = movs.length;
   const returned = movs.slice(0, limit);
+  // Soma de TODOS os resultados (não só dos devolvidos): perguntas como
+  // "quanto gastei com mercado em agosto?" precisam do total mesmo quando a
+  // lista vem truncada pelo limit.
+  const valorTotal = Math.round(movs.reduce((s: number, m: any) => s + (m.valor ?? 0), 0) * 100) / 100;
 
   return toolText(JSON.stringify({
-    total_matches: totalMatches, returned: returned.length, truncated: totalMatches > returned.length, movimentacoes: returned,
+    total_matches: totalMatches, valor_total: valorTotal, returned: returned.length, truncated: totalMatches > returned.length, movimentacoes: returned,
   }, null, 2));
 }

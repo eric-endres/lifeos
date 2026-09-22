@@ -73,6 +73,7 @@
     tarefa_status:  { rotulo: 'Status de tarefa',    tabela: 'lifeos_tarefas',     coluna: 'status', array: false, cor: false },
     evento_tipo:    { rotulo: 'Tipos de evento',     tabela: 'lifeos_eventos',     coluna: 'tipo',   array: false, cor: true  },
     mov_meio:       { rotulo: 'Meios de pagamento',  tabela: 'lifeos_movimentacoes', coluna: 'tipo', array: true,  cor: false },
+    mov_categoria:  { rotulo: 'Categorias de gasto', tabela: 'lifeos_movimentacoes', coluna: 'categoria', array: false, cor: true },
   };
   var MOCK_VOCAB = null;
   var MOCK_SEQ = 100;
@@ -93,6 +94,11 @@
       mov_meio: [
         { id: 'm7', valor: 'Crédito', cor: null, ordem: 10, protegido: true, uso: 45 },
         { id: 'm8', valor: 'Pix', cor: null, ordem: 20, protegido: false, uso: 0 },
+      ],
+      mov_categoria: [
+        { id: 'm9', valor: 'Moradia', cor: '#3987e5', ordem: 10, protegido: false, uso: 12 },
+        { id: 'm10', valor: 'Transporte', cor: '#d95926', ordem: 20, protegido: false, uso: 21 },
+        { id: 'm11', valor: 'Serviços', cor: null, ordem: 90, protegido: false, uso: 0 },
       ],
     };
   }

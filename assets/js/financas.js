@@ -35,9 +35,21 @@
 
   var LS_KEY = (window.LIFEOS_CONFIG && window.LIFEOS_CONFIG.sessionKey) || 'financas_master';     /* senha mestre (só com "lembrar") — mesma chave em lifeos.js/eventos.js */
   var CACHE_KEY = 'financas_cache';   /* cache persistente dos meses (JSON) */
-  var CACHE_V = 2;                     /* bump invalida caches de schema antigo — v2: migração Notion -> lifeos_movimentacoes (ids mudam de page_id pra uuid; cache antigo tem dados da fonte anterior) */
+  var CACHE_V = 3;                     /* bump invalida caches de schema antigo — v2: migração Notion -> lifeos_movimentacoes (ids mudam de page_id pra uuid; cache antigo tem dados da fonte anterior). v3: movimentações ganharam `categoria` (migration 0003) — um cache v2 não tem o campo e mostraria tudo como "Sem categoria" até o ↻ de cada mês */
 
   var MEIOS = ['Crédito', 'Débito', 'Pix', 'Vale', 'Boleto'];
+
+  /* Categorias de gasto (migration 0003) — FALLBACK, como MEIOS; a lista real
+     vem de `lifeos_vocabularios` (domínio mov_categoria). A ORDEM importa: o
+     donut desenha as fatias nela, não por valor (ver renderCatDonut). As cores
+     são uma paleta categórica validada para daltonismo contra o fundo do
+     painel; só categorias COM cor ganham fatia própria. */
+  var CATEGORIAS = ['Moradia', 'Transporte', 'Mercado', 'Sítio', 'Restaurante', 'Saúde', 'Compras', 'Lazer',
+    'Serviços', 'Educação', 'Alimentação', 'Beleza', 'Vestuário', 'Eletrônicos', 'Outros'];
+  var CAT_COR = {
+    'Moradia': '#3987e5', 'Transporte': '#d95926', 'Mercado': '#199e70', 'Sítio': '#c98500',
+    'Restaurante': '#d55181', 'Saúde': '#008300', 'Compras': '#9085e9', 'Lazer': '#e66767',
+  };
 
   /* ── Vocabulários dinâmicos ──────────────────────────────────────────
    * As listas acima são FALLBACK. Desde a migration 0002 elas vivem em
@@ -64,6 +76,14 @@
       function lista(dom) { return (v[dom] || []).map(function (x) { return x.valor; }); }
       var m = lista('mov_meio');
       if (m.length) MEIOS = m;
+      /* Categoria traz a cor junto (só as que têm cor ganham fatia no donut).
+         Domínio vazio mantém o fallback, como os outros. */
+      var cats = v.mov_categoria || [];
+      if (cats.length) {
+        CATEGORIAS = cats.map(function (x) { return x.valor; });
+        CAT_COR = {};
+        cats.forEach(function (x) { if (x.cor) CAT_COR[x.valor] = x.cor; });
+      }
     }).catch(function (e) {
       console.warn('[financas] vocabulários indisponíveis — usando o fallback embutido', e);
     });
@@ -74,6 +94,12 @@
     'Vale': '#b06ee0', 'Boleto': '#e58b5b',
   };
   var SEM_MEIO_COR = '#6b7280';
+  /* Donut por categoria: dois baldes neutros (cinza, nunca uma nona cor). */
+  var SEM_CAT = 'Sem categoria', OUTRAS = 'Outras';
+  var SEM_CAT_COR = '#6b7280';
+  var OUTRAS_COR = '#8b8577';
+  var MAX_FATIAS_COR = 8;   /* teto de fatias coloridas — ver renderCatDonut */
+  var HIST_MESES = 6;       /* meses no card "Últimos meses" (incluindo o exibido) */
   var COR_ENTRADA = '#3fb98c';
   var COR_SAIDA = '#e5616a';
   var COR_SALDO = '#5b8def';
@@ -101,7 +127,11 @@
   var SALDO_ABERTURA = 0;  /* saldo de abertura do mês corrente (meses anteriores) */
   var MROWS = [];          /* transações do mês corrente */
   var LOADING = false;
-  var charts = { donut: null, fluxo: null, saldo: null };
+  var charts = { donut: null, fluxo: null, saldo: null, cat: null, hist: null };
+  var catLabels = [];      /* fatias do donut de categoria, na ordem desenhada */
+  var catFatias = [];      /* categorias com fatia PRÓPRIA no donut atual — o resto é "Outras" */
+  var histMonths = [];     /* 'YYYY-MM' de cada barra do card "Últimos meses" */
+  var HIST_SEQ = 0;        /* descarta desenho de histórico que chegou depois de uma navegação */
 
   var activeDir = new Set();     /* filtro da TABELA */
   var activeMeio = new Set();
@@ -126,6 +156,11 @@
   function isSaida(m) { return has(m, 'Saida'); }
   function isEntrada(m) { return has(m, 'Entrada'); }
   function hasAnyMeio(m) { return MEIOS.some(function (me) { return has(m, me); }); }
+  function catDe(m) { return (m && m.categoria) ? m.categoria : null; }
+  function catCor(nome) { return CAT_COR[nome] || null; }
+  /* Token do tema corrente (CSS custom property) — pro anel de 2px entre as
+     fatias ter a cor da superfície do card, seja qual for o tema. */
+  function tok(name, fb) { var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return v || fb; }
   /* Regime de caixa: compra no Crédito NÃO consome dinheiro no mês (vira fatura
      futura — ver projeção). Só conta como saída de caixa a Saida que não é
      crédito (inclui a linha "Fatura", que é o pagamento de caixa). */
@@ -248,20 +283,23 @@
     var days = lastDayOfMonth(ym);
     var i = 0, rows = [];
     function d(day) { return ym + '-' + String(Math.min(Math.max(day, 1), days)).padStart(2, '0'); }
-    function push(name, valor, day, tipo) {
-      rows.push({ id: 'mock-' + ym + '-' + (i++), name: name, valor: Math.round(valor * 100) / 100, date: d(day), tipo: tipo });
+    function push(name, valor, day, tipo, categoria) {
+      rows.push({ id: 'mock-' + ym + '-' + (i++), name: name, valor: Math.round(valor * 100) / 100, date: d(day), tipo: tipo, categoria: categoria || null });
     }
     push('Salário', 4400, 5, ['Entrada', 'Pix']);
-    push('Aluguel', 1650 + rnd() * 60, 6, ['Saida', 'Pix']);
-    push('Internet', 89.99, 6, ['Saida', 'Pix']);
-    push('Luz', 70 + rnd() * 30, 6, ['Saida', 'Pix']);
-    push('Financiamento Carro', 637.62, 7, ['Saida', 'Boleto']);
+    push('Aluguel', 1650 + rnd() * 60, 6, ['Saida', 'Pix'], 'Moradia');
+    push('Internet', 89.99, 6, ['Saida', 'Pix'], 'Serviços');
+    push('Luz', 70 + rnd() * 30, 6, ['Saida', 'Pix'], 'Moradia');
+    push('Financiamento Carro', 637.62, 7, ['Saida', 'Boleto'], 'Transporte');
     push('Fatura', 1200 + rnd() * 500, 10, ['Saida']);
-    push('Claude', 118.4, 4, ['Saida', 'Crédito']);
+    push('Claude', 118.4, 4, ['Saida', 'Crédito'], 'Serviços');
     push('Reembolso', 12.5, 15, ['Entrada', 'Débito']);
-    for (var c = 0; c < 6; c++) push('Delivery', 20 + rnd() * 60, 3 + c * 4, ['Saida', 'Crédito']);
+    push('Gasolina', 150 + rnd() * 120, 12, ['Saida', 'Crédito'], 'Transporte');
+    push('Farmácia', 30 + rnd() * 90, 18, ['Saida', 'Crédito'], 'Saúde');
+    if (rnd() > 0.4) push('Cinema', 40 + rnd() * 40, 20, ['Saida', 'Crédito'], 'Lazer');
+    for (var c = 0; c < 6; c++) push('Delivery', 20 + rnd() * 60, 3 + c * 4, ['Saida', 'Crédito'], 'Restaurante');
     for (var pxi = 0; pxi < 5; pxi++) push('Pai', 25 + rnd() * 10, 2 + pxi * 5, ['Entrada', 'Pix']);
-    for (var deb = 0; deb < 5; deb++) push('Mercado', 4 + rnd() * 40, 1 + deb * 5, ['Saida', 'Débito']);
+    for (var deb = 0; deb < 5; deb++) push('Mercado', 4 + rnd() * 40, 1 + deb * 5, ['Saida', 'Débito'], 'Mercado');
     return rows;
   }
 
@@ -578,9 +616,11 @@
     $('dash-content').hidden = false;
     $('export-btn').hidden = false;
 
+    renderCategorias();
     renderDonutForMode(donutMode);
     renderFluxo(MROWS);
     renderSaldo(MROWS);
+    renderHistorico();
     renderFaturaMesPassado();
     renderFaturaProjetada();
     renderRecorrencias();
@@ -750,7 +790,280 @@
     });
   }
 
-  function destroyCharts() { ['donut', 'fluxo', 'saldo'].forEach(function (k) { if (charts[k]) { charts[k].destroy(); charts[k] = null; } }); }
+  function destroyCharts() { ['donut', 'fluxo', 'saldo', 'cat', 'hist'].forEach(function (k) { if (charts[k]) { charts[k].destroy(); charts[k] = null; } }); }
+
+  /* ── Por categoria (donut + ranking) ─────────────────────────────
+     "Onde o dinheiro foi" = CONSUMO: saídas com crédito incluído, MENOS os
+     pagamentos de fatura. A fatura paga compras que já estão contadas no mês
+     em que foram feitas (no crédito) — somar as duas contaria o mesmo
+     dinheiro duas vezes. Mesmo motivo pelo qual calcularProjecaoFatura já
+     exclui /fatura/ das compras. O card "Últimos meses" usa a mesma base. */
+  function isConsumo(m) { return isSaida(m) && !isPagamentoFatura(m); }
+  function somaPorCategoria(rows) {
+    var map = {};
+    rows.forEach(function (m) {
+      if (!isConsumo(m)) return;
+      var c = catDe(m) || SEM_CAT;
+      if (!map[c]) map[c] = { nome: c, valor: 0, count: 0 };
+      map[c].valor += num(m.valor); map[c].count++;
+    });
+    return map;
+  }
+  function totalDe(map) { return Object.keys(map).reduce(function (s, k) { return s + map[k].valor; }, 0); }
+
+  function renderCategorias() {
+    var ym = currentYM(), pYm = prevMonth(ym);
+    var map = somaPorCategoria(MROWS);
+    renderCatDonut(map);
+    renderCatRanking(map, null);
+    /* A variação contra o mês anterior precisa do mês anterior, que pode não
+       estar em cache: desenha já sem ela e completa quando o mês chegar.
+       ensureMonthRows cacheia, então navegar de volta não busca de novo. */
+    if (!RANGE || !RANGE.min || pYm < RANGE.min) { $('cat-rank-hint').textContent = '· sem mês anterior para comparar'; return; }
+    $('cat-rank-hint').textContent = '· vs. ' + monthLabel(pYm).toLowerCase();
+    ensureMonthRows(pYm).then(function (prevRows) {
+      if (currentYM() !== ym || !prevRows) return; /* navegou enquanto buscava */
+      renderCatRanking(somaPorCategoria(MROWS), somaPorCategoria(prevRows));
+    });
+  }
+
+  /* Quem ganha fatia própria: categorias COM cor, na ORDEM do vocabulário (não
+     por valor). A paleta foi validada para daltonismo par a par entre VIZINHAS
+     nessa ordem — ordenar por valor embaralharia os pares e desfaria a
+     validação. Sem cor -> "Outras" (cinza). Mais de MAX_FATIAS_COR coloridas
+     no mês -> ficam as 7 maiores; as demais também vão pra "Outras". Nunca uma
+     nona cor: ela ficaria indistinguível das vizinhas. O ranking ao lado lista
+     todas pelo nome, então nada fica sem leitura. */
+  function renderCatDonut(map) {
+    var coloridas = CATEGORIAS.filter(function (c) { return map[c] && map[c].valor > 0 && catCor(c); });
+    if (coloridas.length > MAX_FATIAS_COR) {
+      var maiores = coloridas.slice().sort(function (a, b) { return map[b].valor - map[a].valor; }).slice(0, MAX_FATIAS_COR - 1);
+      coloridas = coloridas.filter(function (c) { return maiores.indexOf(c) !== -1; });
+    }
+    catFatias = coloridas;
+    var outras = 0;
+    Object.keys(map).forEach(function (c) { if (c !== SEM_CAT && coloridas.indexOf(c) === -1) outras += map[c].valor; });
+
+    catLabels = []; var data = [], cores = [];
+    coloridas.forEach(function (c) { catLabels.push(c); data.push(round2(map[c].valor)); cores.push(catCor(c)); });
+    if (outras > 0) { catLabels.push(OUTRAS); data.push(round2(outras)); cores.push(OUTRAS_COR); }
+    if (map[SEM_CAT] && map[SEM_CAT].valor > 0) { catLabels.push(SEM_CAT); data.push(round2(map[SEM_CAT].valor)); cores.push(SEM_CAT_COR); }
+
+    if (charts.cat) { charts.cat.destroy(); charts.cat = null; }
+    var hasData = data.length > 0;
+    $('cat-empty').hidden = hasData;
+    $('chart-cat').style.display = hasData ? '' : 'none';
+    if (!hasData) return;
+
+    charts.cat = new Chart($('chart-cat'), {
+      type: 'doughnut',
+      /* anel de 2px na cor da superfície do card separa as fatias */
+      data: { labels: catLabels, datasets: [{ data: data, backgroundColor: cores, borderColor: tok('--surface', '#1c1a16'), borderWidth: 2 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 350 }, cutout: '58%',
+        onHover: pointerHover,
+        onClick: function (e, els) { if (els.length) openCategoriaModal(catLabels[els[0].index]); },
+        plugins: {
+          legend: legendCfg(),
+          tooltip: baseTooltip({
+            callbacks: {
+              label: function (c) {
+                var total = c.dataset.data.reduce(function (a, b) { return a + b; }, 0);
+                var pct = total ? Math.round(c.parsed / total * 100) : 0;
+                return ' ' + c.label + ': ' + brl.format(c.parsed) + ' (' + pct + '%)';
+              },
+              footer: function () { return 'toque para ver as transações'; },
+            },
+          }),
+        },
+      },
+    });
+  }
+
+  /* Ranking: TODAS as categorias do mês, da maior pra menor, com a fatia do
+     total e — quando o mês anterior está disponível — a variação contra ele.
+     É também a "visão em tabela" do donut: cada linha tem nome, então a cor
+     nunca carrega a identidade sozinha. Categorias que tinham gasto no mês
+     anterior e zeraram neste entram no fim (▼ 100%). */
+  function renderCatRanking(map, prevMap) {
+    var host = $('cat-rank'); host.innerHTML = '';
+    var total = totalDe(map);
+    var arr = Object.keys(map).map(function (k) { return map[k]; }).filter(function (x) { return x.valor > 0; })
+      .sort(function (a, b) { return b.valor - a.valor; });
+    if (prevMap) {
+      Object.keys(prevMap).forEach(function (k) {
+        if (prevMap[k].valor > 0 && !(map[k] && map[k].valor > 0)) arr.push({ nome: k, valor: 0, count: 0 });
+      });
+    }
+    if (!arr.length) {
+      var e = document.createElement('div'); e.className = 'cat-rank-empty'; e.textContent = 'sem saídas neste mês';
+      host.appendChild(e); return;
+    }
+    var max = arr[0].valor || 1;
+    arr.forEach(function (x) {
+      var cor = x.nome === SEM_CAT ? SEM_CAT_COR : (catCor(x.nome) || OUTRAS_COR);
+      var row = document.createElement('button'); row.type = 'button'; row.className = 'cat-rank-row';
+      row.title = x.count ? ('ver as ' + x.count + (x.count === 1 ? ' transação' : ' transações')) : 'sem gasto neste mês';
+      row.addEventListener('click', function () { openCategoriaModal(x.nome); });
+
+      var dot = document.createElement('span'); dot.className = 'cat-dot'; dot.style.background = cor;
+      var nm = document.createElement('span'); nm.className = 'cat-rank-name'; nm.textContent = x.nome;
+      var val = document.createElement('span'); val.className = 'cat-rank-val'; val.textContent = brl.format(x.valor);
+      var bar = document.createElement('span'); bar.className = 'cat-rank-bar';
+      var fill = document.createElement('span'); fill.style.width = Math.max(0, x.valor / max * 100) + '%'; fill.style.background = cor;
+      bar.appendChild(fill);
+      var meta = document.createElement('span'); meta.className = 'cat-rank-meta';
+      meta.appendChild(document.createTextNode(total ? Math.round(x.valor / total * 100) + '%' : '—'));
+      if (prevMap) {
+        var prev = prevMap[x.nome] ? prevMap[x.nome].valor : 0;
+        var diff = round2(x.valor - prev);
+        var d = document.createElement('span'); d.className = 'cat-delta';
+        if (prev === 0) d.textContent = ' · novo';
+        else if (diff === 0) d.textContent = ' · =';
+        else {
+          /* gastar MAIS é o sinal ruim: ▲ vermelho; gastar menos, ▼ verde.
+             A seta vai junto, então a cor nunca é o único sinal. */
+          d.className += diff > 0 ? ' up' : ' down';
+          var pct = Math.abs(diff / prev * 100);
+          var pctTxt = pct < 1 ? '<1%' : Math.round(pct) + '%'; /* sem "−0%" */
+          d.textContent = ' · ' + (diff > 0 ? '▲ ' : '▼ ') + brlShort(Math.abs(diff)) + ' (' + (diff > 0 ? '+' : '−') + pctTxt + ')';
+        }
+        meta.appendChild(d);
+      }
+      row.appendChild(dot); row.appendChild(nm); row.appendChild(val);
+      row.appendChild(bar); row.appendChild(meta);
+      host.appendChild(row);
+    });
+  }
+
+  function openCategoriaModal(label) {
+    var rows;
+    if (label === SEM_CAT) rows = MROWS.filter(function (m) { return isConsumo(m) && !catDe(m); });
+    else if (label === OUTRAS) rows = MROWS.filter(function (m) { return isConsumo(m) && catDe(m) && catFatias.indexOf(catDe(m)) === -1; });
+    else rows = MROWS.filter(function (m) { return isConsumo(m) && catDe(m) === label; });
+    openTxModal('Categoria · ' + label, monthLabel(currentYM()), rows);
+  }
+
+  /* ── Últimos meses (entradas × saídas por mês) ─────────────────────
+     Os meses anteriores vêm de ensureMonthRows — o MESMO cache por mês da
+     página (FINANCAS.md §5), sem rota nova na Edge Function: o primeiro acesso
+     busca cada mês uma vez; depois abre sem rede. O mês exibido usa MROWS (e
+     não o cache), pra refletir na hora uma edição feita agora. */
+  function renderHistorico() {
+    var seq = ++HIST_SEQ;
+    var ym = currentYM();
+    var min = (RANGE && RANGE.min) ? RANGE.min : ym;
+    var meses = [];
+    for (var m = ym, i = 0; i < HIST_MESES && m >= min; i++, m = prevMonth(m)) meses.unshift(m);
+    var faltando = meses.some(function (x) { return x !== ym && !monthCache[x]; });
+    $('hist-empty').textContent = 'carregando histórico…';
+    $('hist-empty').hidden = !faltando;
+    Promise.all(meses.map(function (x) { return x === ym ? Promise.resolve(MROWS) : ensureMonthRows(x); })).then(function (lists) {
+      if (seq !== HIST_SEQ || currentYM() !== ym) return; /* navegou enquanto buscava */
+      drawHistorico(meses, lists, ym);
+    });
+  }
+
+  function drawHistorico(meses, lists, ymAtual) {
+    var ms = [], ins = [], outs = [];
+    meses.forEach(function (x, i) {
+      if (!lists[i]) return; /* mês que falhou ao buscar: fica de fora, não vira zero */
+      var ent = 0, sai = 0;
+      lists[i].forEach(function (m) {
+        if (isEntrada(m)) ent += num(m.valor);
+        if (isConsumo(m)) sai += num(m.valor); /* sem pagamento de fatura — ver isConsumo */
+      });
+      ms.push(x); ins.push(round2(ent)); outs.push(round2(sai));
+    });
+    histMonths = ms;
+    $('hist-empty').hidden = true;
+    if (charts.hist) { charts.hist.destroy(); charts.hist = null; }
+
+    var anoAtual = ymAtual.slice(0, 4);
+    var labels = ms.map(function (x) {
+      var p = x.split('-'), l = MESES[(+p[1]) - 1].slice(0, 3);
+      return p[0] === anoAtual ? l : l + '/' + p[0].slice(2);
+    });
+    /* mês exibido em cor cheia; os outros esmaecidos — mesma cor (identidade
+       da série), só a intensidade marca "é este aqui" */
+    function tinge(cor) { return ms.map(function (x) { return x === ymAtual ? cor : cor + '66'; }); }
+    var legenda = legendCfg();
+    legenda.labels.generateLabels = function (chart) {
+      /* sem isto a legenda pegaria a cor da PRIMEIRA barra, que é esmaecida */
+      var itens = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+      itens.forEach(function (it, i) { it.fillStyle = it.strokeStyle = i === 0 ? COR_ENTRADA : COR_SAIDA; });
+      return itens;
+    };
+
+    charts.hist = new Chart($('chart-hist'), {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          /* categoryPercentage menor aproxima o par entrada/saída de cada mês —
+             com poucos meses, o padrão (0.8) os deixa longe um do outro */
+          { label: 'Entradas', data: ins, backgroundColor: tinge(COR_ENTRADA), borderRadius: 3, maxBarThickness: 28, categoryPercentage: 0.55 },
+          { label: 'Saídas', data: outs, backgroundColor: tinge(COR_SAIDA), borderRadius: 3, maxBarThickness: 28, categoryPercentage: 0.55 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 350 },
+        interaction: { mode: 'index', intersect: false, axis: 'x' },
+        onHover: pointerHover,
+        onClick: function (e, els) { if (els.length) goToMonth(histMonths[els[0].index]); },
+        scales: moneyScales(),
+        plugins: {
+          legend: legenda,
+          tooltip: baseTooltip({
+            callbacks: {
+              title: function (c) { return monthLabel(histMonths[c[0].dataIndex]); },
+              label: function (c) { return ' ' + c.dataset.label + ': ' + brl.format(c.parsed.y); },
+              footer: function (c) { return histMonths[c[0].dataIndex] === currentYM() ? 'mês exibido' : 'toque para abrir o mês'; },
+            },
+          }),
+        },
+      },
+    });
+
+    renderHistResumo(ms, outs, ymAtual);
+  }
+
+  /* Média, mais caro e mais barato só com meses FECHADOS: o mês corrente,
+     pela metade, pareceria sempre o mais barato e puxaria a média pra baixo. */
+  function renderHistResumo(ms, outs, ymAtual) {
+    var host = $('hist-summary'); host.innerHTML = '';
+    function span(cls, txt) { var x = document.createElement('span'); x.className = cls; x.textContent = txt; return x; }
+    var hoje = todayYM();
+    var fechados = [];
+    ms.forEach(function (x, i) { if (x < hoje) fechados.push({ ym: x, s: outs[i] }); });
+    if (fechados.length) {
+      var media = fechados.reduce(function (a, f) { return a + f.s; }, 0) / fechados.length;
+      host.appendChild(span('an-key', 'saídas'));
+      host.appendChild(span('an-val', 'média ' + brl.format(media) + ' (' + fechados.length + (fechados.length === 1 ? ' mês fechado)' : ' meses fechados)')));
+      if (fechados.length >= 2) {
+        var caro = fechados.reduce(function (a, b) { return b.s > a.s ? b : a; });
+        var barato = fechados.reduce(function (a, b) { return b.s < a.s ? b : a; });
+        host.appendChild(span('an-val', 'mais caro ' + monthLabel(caro.ym).toLowerCase() + ' ' + brl.format(caro.s)));
+        host.appendChild(span('an-val', 'mais barato ' + monthLabel(barato.ym).toLowerCase() + ' ' + brl.format(barato.s)));
+      }
+    }
+    var iAtual = ms.indexOf(ymAtual);
+    if (iAtual > 0) {
+      var d = round2(outs[iAtual] - outs[iAtual - 1]);
+      var ref = monthLabel(ms[iAtual - 1]).toLowerCase();
+      if (d === 0) host.appendChild(span('an-val', '= ' + ref));
+      else host.appendChild(span('an-val ' + (d > 0 ? 'neg' : 'pos'), (d > 0 ? '▲ ' : '▼ ') + brl.format(Math.abs(d)) + ' vs. ' + ref));
+    }
+    host.hidden = !host.childNodes.length;
+  }
+
+  /* Pula direto pra um mês (clique numa barra de "Últimos meses"). */
+  function goToMonth(ym) {
+    if (LOADING || ym === currentYM() || MONTHS.indexOf(ym) === -1) return;
+    clearAllFilters();
+    loadMonth(ym);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
 
   /* ── Fatura projetada (competência de crédito) ───────────────── */
   /* Projeção de leitura: agrupa as compras em Crédito de um mês-fonte por ciclo
@@ -993,7 +1306,7 @@
      subconjunto já filtrado pela busca). */
   function matchesSearch(m) {
     if (!searchQuery) return true;
-    return normName(m.name).indexOf(searchQuery) !== -1;
+    return normName(m.name).indexOf(searchQuery) !== -1 || normName(catDe(m)).indexOf(searchQuery) !== -1;
   }
 
   function buildBadges(hostId, rows, dirSet, meioSet, onChange) {
@@ -1065,6 +1378,7 @@
     var td2 = document.createElement('td'); td2.className = 'td-name'; td2.textContent = m.name || '—';
     var td3 = document.createElement('td'); td3.className = 'td-tipo';
     (m.tipo || []).forEach(function (t) { var s = document.createElement('span'); s.className = 'tag tag-' + tagClass(t); s.textContent = t; td3.appendChild(s); });
+    if (catDe(m)) td3.appendChild(catTagNode(m.categoria));
     var td4 = document.createElement('td');
     var dir = isSaida(m) ? 'neg' : (isEntrada(m) ? 'pos' : '');
     var sign = isSaida(m) ? '− ' : (isEntrada(m) ? '+ ' : '');
@@ -1094,6 +1408,15 @@
     td4.appendChild(wrap);
     tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4);
     return tr;
+  }
+  /* Tag de categoria: texto na tinta do texto, ponto na cor da categoria (sem
+     cor no vocabulário, o ponto fica neutro — ver .cat-dot no CSS). */
+  function catTagNode(nome) {
+    var s = document.createElement('span'); s.className = 'tag tag-cat';
+    var dot = document.createElement('i'); dot.className = 'cat-dot';
+    var cor = catCor(nome); if (cor) dot.style.background = cor;
+    s.appendChild(dot); s.appendChild(document.createTextNode(nome));
+    return s;
   }
   /* Header do grupo do dia: data à esquerda, entradas/saídas/diferença do dia
      na mesma linha (reaproveita summarize(), já usado no resto do dashboard). */
@@ -1261,7 +1584,20 @@
      (ex.: uma movimentação com mais de um meio, que o formulário colapsa
      num único <select>, não seria "diferente" do original por acidente). */
   var EDIT_ID = null;
-  var EDIT_DIRTY = { date: false, valor: false, tipo: false };
+  var EDIT_DIRTY = { date: false, valor: false, tipo: false, categoria: false };
+
+  /* Opções de categoria montadas na ABERTURA do modal, não no init(): o
+     vocabulário chega depois do init (armadilha do CLAUDE.md). Uma categoria
+     que saiu do vocabulário mas ainda está na linha continua na lista — senão
+     o <select> cairia em "nenhuma" e um save apagaria a categoria sem querer. */
+  function fillCategoriaSelect(sel, atual) {
+    sel.innerHTML = '';
+    var vazio = document.createElement('option'); vazio.value = ''; vazio.textContent = '— nenhuma —'; sel.appendChild(vazio);
+    var lista = CATEGORIAS.slice();
+    if (atual && lista.indexOf(atual) === -1) lista.push(atual);
+    lista.forEach(function (c) { var o = document.createElement('option'); o.value = c; o.textContent = c; sel.appendChild(o); });
+    sel.value = atual || '';
+  }
 
   function openEditModal(id) {
     var m = null;
@@ -1269,8 +1605,9 @@
     if (!m) return;
     if ($('modal').classList.contains('open')) closeModal(); /* evita dois modais sobrepostos */
     EDIT_ID = id;
-    EDIT_DIRTY = { date: false, valor: false, tipo: false };
+    EDIT_DIRTY = { date: false, valor: false, tipo: false, categoria: false };
     $('edit-modal-sub').textContent = m.name || '—';
+    fillCategoriaSelect($('edit-categoria'), catDe(m));
     $('edit-date').value = m.date || '';
     $('edit-valor').value = num(m.valor).toFixed(2);
     $('edit-direcao').value = isSaida(m) ? 'Saida' : 'Entrada';
@@ -1375,6 +1712,7 @@
       var meioVal = $('edit-meio').value;
       patch.tipo = meioVal ? [$('edit-direcao').value, meioVal] : [$('edit-direcao').value];
     }
+    if (EDIT_DIRTY.categoria) patch.categoria = $('edit-categoria').value || null;
     if (!Object.keys(patch).length) { closeEditModal(); return; }
 
     setEditSaving(true);
@@ -1403,6 +1741,7 @@
     $('create-nome').value = '';
     $('create-direcao').value = 'Saida';
     $('create-meio').value = '';
+    fillCategoriaSelect($('create-categoria'), null);
     $('create-error').textContent = '';
     setCreateSaving(false);
     $('create-modal').classList.add('open');
@@ -1423,6 +1762,8 @@
     if (!isFinite(v) || v < 0) { $('create-error').textContent = 'valor inválido'; return; }
 
     var movimentacao = { name: nome, valor: round2(v), date: d, tipo: meioVal ? [direcao, meioVal] : [direcao] };
+    var catVal = $('create-categoria').value;
+    if (catVal) movimentacao.categoria = catVal; /* opcional — ausente = sem categoria */
     setCreateSaving(true);
     $('create-error').textContent = '';
     apiCreate(SESSION_PW, movimentacao).then(function (j) {
@@ -1451,7 +1792,9 @@
     return s;
   }
   function buildCsv() {
-    var headers = ['data', 'descricao', 'valor', 'direcao', 'meio', 'tipo_raw', 'valor_liquido', 'id'];
+    /* `categoria` entra no FIM (não ao lado de `meio`) pra não deslocar as
+       colunas de quem já lê este CSV por posição. */
+    var headers = ['data', 'descricao', 'valor', 'direcao', 'meio', 'tipo_raw', 'valor_liquido', 'id', 'categoria'];
     var lines = [headers.join(',')];
     var sorted = MROWS.slice().sort(function (a, b) { return (a.date || '').localeCompare(b.date || ''); });
     sorted.forEach(function (m) {
@@ -1460,7 +1803,7 @@
       var meios = MEIOS.filter(function (me) { return has(m, me); });
       var meio = meios.length ? meios.join(';') : ((isSaida(m) || isEntrada(m)) ? 'Sem meio' : '');
       var liquido = 0; if (isEntrada(m)) liquido += v; if (isSaida(m)) liquido -= v;
-      var row = [m.date || '', m.name || '', v.toFixed(2), dir, meio, (m.tipo || []).join(';'), liquido.toFixed(2), m.id || ''];
+      var row = [m.date || '', m.name || '', v.toFixed(2), dir, meio, (m.tipo || []).join(';'), liquido.toFixed(2), m.id || '', catDe(m) || ''];
       lines.push(row.map(csvCell).join(','));
     });
     return '﻿' + lines.join('\r\n'); /* BOM UTF-8 + CRLF (Excel-friendly) */
@@ -1624,6 +1967,7 @@
     $('edit-valor').addEventListener('input', function () { EDIT_DIRTY.valor = true; });
     $('edit-direcao').addEventListener('change', function () { EDIT_DIRTY.tipo = true; });
     $('edit-meio').addEventListener('change', function () { EDIT_DIRTY.tipo = true; });
+    $('edit-categoria').addEventListener('change', function () { EDIT_DIRTY.categoria = true; });
     $('create-btn').addEventListener('click', openCreateModal);
     $('create-form').addEventListener('submit', onCreateSubmit);
     $('create-cancel').addEventListener('click', closeCreateModal);
